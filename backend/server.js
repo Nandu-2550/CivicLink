@@ -3,6 +3,7 @@ const cors = require("cors");
 const mongoose = require("mongoose");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
+const nodemailer = require("nodemailer");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -25,6 +26,9 @@ const CATEGORIES = [
 ];
 
 const STATUS_STAGES = ["Pending", "Acknowledged", "Investigating", "In Progress", "Resolved"];
+
+// Store OTPs temporarily (in production, use Redis or database)
+const otpStore = new Map();
 
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
@@ -51,10 +55,9 @@ connectToDatabase();
 
 const userSchema = new mongoose.Schema(
   {
-    username: { type: String, required: true, unique: true, lowercase: true, trim: true },
     name: { type: String, required: true, trim: true },
     contactNumber: { type: String, required: true, trim: true },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    email: { type: String, required: false, lowercase: true, trim: true },
     address: { type: String, required: true, trim: true },
     role: { type: String, enum: ["citizen", "authority-admin"], default: "citizen" },
     lastLogin: { type: Date, default: Date.now },
@@ -347,32 +350,178 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true, app: "CivicLink" });
 });
 
-app.post("/api/auth/signup", async (req, res) => {
+// Send OTP endpoint
+app.post("/api/auth/send-otp", async (req, res) => {
   try {
-    const { name, username, email, contactNumber, address, password, role } = req.body;
+    const { identifier } = req.body;
 
-    if (!name || !username || !email || !contactNumber || !address || !password) {
-      return res
-        .status(400)
-        .json({ message: "Name, username, email, contact number, address and password are required." });
+    if (!identifier) {
+      return res.status(400).json({ message: "Email or phone number is required." });
     }
 
-    const normalizedEmail = String(email).toLowerCase().trim();
-    const normalizedUsername = String(username).toLowerCase().trim();
-
-    const existing = await User.findOne({
-      $or: [{ email: normalizedEmail }, { username: normalizedUsername }],
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // Store OTP with 5 minute expiry
+    otpStore.set(identifier, {
+      code: otp,
+      expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutes
     });
-    if (existing) {
-      return res.status(409).json({ message: "Account already exists for this email or username." });
+
+    const isEmail = identifier.includes('@');
+
+    if (isEmail) {
+      // Send OTP via email
+      try {
+        // Check if email credentials are configured
+        const emailUser = process.env.EMAIL_USER;
+        const emailPass = process.env.EMAIL_PASS;
+        
+        if (emailUser && emailPass && emailUser !== 'your-email@gmail.com') {
+          const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+              user: emailUser,
+              pass: emailPass,
+            },
+          });
+
+          const mailOptions = {
+            from: emailUser,
+            to: identifier,
+            subject: 'CivicLink - Verification Code',
+            html: `
+              <h2>CivicLink Verification</h2>
+              <p>Your verification code is:</p>
+              <h1 style="color: #3b82f6; font-size: 32px; letter-spacing: 8px;">${otp}</h1>
+              <p>This code will expire in 5 minutes.</p>
+              <p>If you didn't request this code, please ignore this email.</p>
+            `,
+          };
+
+          await transporter.sendMail(mailOptions);
+          console.log(`OTP sent to email: ${identifier}`);
+        } else {
+          // Development mode - log OTP to console
+          console.log('\n========================================');
+          console.log(`[DEVELOPMENT MODE] OTP for ${identifier}: ${otp}`);
+          console.log('========================================\n');
+        }
+      } catch (emailError) {
+        console.error('Email sending failed:', emailError.message);
+        // Fallback to console logging
+        console.log('\n========================================');
+        console.log(`[DEVELOPMENT MODE] OTP for ${identifier}: ${otp}`);
+        console.log('========================================\n');
+      }
+    } else {
+      // Send OTP via SMS (using a service like Twilio)
+      try {
+        // Check if Twilio credentials are configured
+        const twilioSid = process.env.TWILIO_ACCOUNT_SID;
+        const twilioToken = process.env.TWILIO_AUTH_TOKEN;
+        
+        if (twilioSid && twilioToken) {
+          const twilio = require('twilio');
+          const client = twilio(twilioSid, twilioToken);
+          await client.messages.create({
+            body: `Your CivicLink verification code is: ${otp}`,
+            from: process.env.TWILIO_PHONE_NUMBER,
+            to: identifier,
+          });
+          console.log(`OTP sent to phone: ${identifier}`);
+        } else {
+          // Development mode - log OTP to console
+          console.log('\n========================================');
+          console.log(`[DEVELOPMENT MODE] OTP for ${identifier}: ${otp}`);
+          console.log('========================================\n');
+        }
+      } catch (smsError) {
+        console.error('SMS sending failed:', smsError.message);
+        // Fallback to console logging
+        console.log('\n========================================');
+        console.log(`[DEVELOPMENT MODE] OTP for ${identifier}: ${otp}`);
+        console.log('========================================\n');
+      }
+    }
+
+    return res.json({ 
+      message: "OTP sent successfully",
+      expiresAt: 5 * 60 // 5 minutes in seconds
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to send OTP.", error: error.message });
+  }
+});
+
+// Verify OTP endpoint
+app.post("/api/auth/verify-otp", (req, res) => {
+  try {
+    const { identifier, otp } = req.body;
+
+    if (!identifier || !otp) {
+      return res.status(400).json({ message: "Identifier and OTP are required." });
+    }
+
+    const storedOTP = otpStore.get(identifier);
+
+    if (!storedOTP) {
+      return res.status(400).json({ message: "No OTP found. Please request a new one." });
+    }
+
+    if (Date.now() > storedOTP.expiresAt) {
+      otpStore.delete(identifier);
+      return res.status(400).json({ message: "OTP has expired. Please request a new one." });
+    }
+
+    if (storedOTP.code !== otp) {
+      return res.status(400).json({ message: "Invalid OTP. Please try again." });
+    }
+
+    // OTP is valid, remove it from store
+    otpStore.delete(identifier);
+
+    return res.json({ 
+      message: "OTP verified successfully",
+      verified: true 
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "OTP verification failed.", error: error.message });
+  }
+});
+
+app.post("/api/auth/signup", async (req, res) => {
+  try {
+    const { name, email, contactNumber, address, password, role } = req.body;
+
+    if (!name || !address || !password) {
+      return res
+        .status(400)
+        .json({ message: "Name, address and password are required." });
+    }
+
+    // Either email or contactNumber must be provided
+    if (!email && !contactNumber) {
+      return res
+        .status(400)
+        .json({ message: "Either email or contact number is required." });
+    }
+
+    const normalizedEmail = email ? String(email).toLowerCase().trim() : null;
+
+    // Check for existing user by email (if provided)
+    if (normalizedEmail) {
+      const existing = await User.findOne({ email: normalizedEmail });
+      if (existing) {
+        return res.status(409).json({ message: "Account already exists for this email." });
+      }
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const user = await User.create({
       name,
-      username: normalizedUsername,
       email: normalizedEmail,
-      contactNumber,
+      contactNumber: contactNumber || "",
       address,
       role: role === "authority-admin" ? "authority-admin" : "citizen",
       password: hashedPassword,
@@ -385,7 +534,6 @@ app.post("/api/auth/signup", async (req, res) => {
       user: {
         id: user._id.toString(),
         name: user.name,
-        username: user.username,
         role: user.role,
         contactNumber: user.contactNumber,
         email: user.email,
@@ -404,7 +552,7 @@ app.post("/api/auth/login", async (req, res) => {
     const { identifier, password, role } = req.body;
 
     if (!identifier || !password) {
-      return res.status(400).json({ message: "Email/username and password are required." });
+      return res.status(400).json({ message: "Email/phone and password are required." });
     }
 
     const normalizedIdentifier = String(identifier).toLowerCase().trim();
@@ -415,16 +563,22 @@ app.post("/api/auth/login", async (req, res) => {
         ? { $or: [{ role: "citizen" }, { role: { $exists: false } }] }
         : { role: requestedRole };
 
+    // Check if identifier is email or phone
+    const isEmail = normalizedIdentifier.includes('@');
+    const searchFilter = isEmail 
+      ? { email: normalizedIdentifier }
+      : { contactNumber: normalizedIdentifier };
+
     const user = await User.findOne({
-      $and: [{ $or: [{ email: normalizedIdentifier }, { username: normalizedIdentifier }] }, roleFilter],
+      $and: [searchFilter, roleFilter],
     });
     if (!user) {
-      return res.status(401).json({ message: "Invalid credentials." });
+      return res.status(401).json({ message: "User not found." });
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      return res.status(401).json({ message: "Invalid credentials." });
+      return res.status(401).json({ message: "Wrong password." });
     }
 
     user.lastLogin = new Date();
@@ -436,7 +590,6 @@ app.post("/api/auth/login", async (req, res) => {
       user: {
         id: user._id.toString(),
         name: user.name,
-        username: user.username,
         role: user.role,
         contactNumber: user.contactNumber,
         email: user.email,

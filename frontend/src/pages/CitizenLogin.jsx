@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { apiFetch } from "../lib/api";
 import { setCitizenSession } from "../lib/auth";
 
-export default function Login() {
+export default function CitizenLogin() {
   const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -18,7 +18,10 @@ export default function Login() {
     try {
       const data = await apiFetch("/api/auth/login", {
         method: "POST",
-        body: JSON.stringify({ identifier, password }),
+        body: JSON.stringify({
+          identifier,
+          password
+        }),
       });
       setCitizenSession(data);
       navigate("/dashboard");
@@ -32,11 +35,12 @@ export default function Login() {
   return (
     <section className="page-wrap">
       <div className="glass-card glow-border w-full max-w-md p-8">
-        <h1 className="brand-title">CivicLink</h1>
-        <p className="subtitle">Citizen Login</p>
+        <h1 className="brand-title">Citizen Login</h1>
+        <p className="subtitle">Email or Phone + Password</p>
 
         <form className="mt-6 space-y-4" onSubmit={onSubmit}>
           {error ? <p className="error-box">{error}</p> : null}
+          
           <input
             type="text"
             placeholder="Email or phone number"
@@ -44,23 +48,25 @@ export default function Login() {
             onChange={(e) => setIdentifier(e.target.value)}
             required
           />
+
           <input
             type="password"
-            placeholder="Password"
+            placeholder="Enter password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
           />
+
           <button className="btn-primary w-full" type="submit" disabled={loading}>
-            {loading ? "Signing in..." : "Login"}
+            {loading ? "Logging in..." : "Login"}
           </button>
         </form>
 
         <p className="helper-text">
-          New citizen? <Link to="/signup">Create account</Link>
+          New user? <Link to="/signup">Create account</Link>
         </p>
         <p className="helper-text">
-          <Link to="/">← Back to Home</Link>
+          Authority? <Link to="/authority-login">Authority login</Link>
         </p>
       </div>
     </section>
